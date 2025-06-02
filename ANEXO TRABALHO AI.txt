@@ -1,0 +1,229 @@
+README.md
+
+# Reconstrução de Imagens de MRI com Redes Neurais Complexas
+
+Este repositório contém o código e os recursos para o trabalho prático da disciplina de Inteligência Artificial (FACOM-UFMS), intitulado "Do Real ao Complexo: Uma Reconstrução Matemática e Algorítmica para a Próxima Geração de Redes Neurais".
+
+O objetivo deste projeto é comparar experimentalmente o desempenho de uma U-Net de valores complexos (CVNN-U-Net) com quatro modelos de base (duas U-Nets reais, uma GAN e Compressed Sensing) na tarefa de reconstrução de imagens de ressonância magnética do joelho, utilizando o dataset fastMRI++.
+
+#Estrutura do Repositório
+
+- `/artigo/Artigo_Final.pdf`: A versão final do artigo submetido.
+- `/codigo/`: Contém todo o código fonte.
+  - `modelos.py`: Definição das arquiteturas de rede (CVNN-U-Net, U-Net Real, GAN).
+  - `dataset.py`: Classe do dataset PyTorch para carregar e pré-processar os dados.
+  - `treinar.py`: Script principal para treinar os modelos de deep learning.
+  - `avaliar.py`: Script para avaliar os modelos treinados e gerar as métricas da Tabela 1.
+  - `cs_baseline.py`: Implementação do baseline de Compressed Sensing.
+  - `utils.py`: Funções utilitárias (cálculo de métricas, etc.).
+- `requirements.txt`: Lista de dependências Python para criar o ambiente de execução.
+- `README.md`: Este arquivo.
+
+#Instruções de Instalação e Execução
+
+#1. Pré-requisitos
+- Python 3.9+
+- CUDA e cuDNN (para treinamento em GPU)
+
+#2. Configuração do Ambiente
+Recomenda-se o uso de um ambiente virtual.
+
+```bash
+# Clone este repositório (exemplo)
+# git clone ...
+
+# Crie e ative um ambiente virtual
+python -m venv venv
+source venv/bin/activate  # No Windows: venv\Scripts\activate
+
+# Instale as dependências
+pip install -r requirements.txt
+```
+
+#3. Dataset
+- Baixe o dataset `knee_singlecoil` do [fastMRI++](https://fastmri.med.nyu.edu/).
+- Descompacte e coloque os arquivos `.h5` dentro de uma pasta `./data/`. A estrutura deve ser:
+  - `./data/knee_singlecoil_train/`
+  - `./data/knee_singlecoil_val/`
+  - `./data/knee_singlecoil_test_v2/`
+
+#4. Executando os Experimentos
+
+**a) Treinamento dos Modelos**
+O script `treinar.py` aceita um argumento `--modelo` para selecionar qual arquitetura treinar.
+
+```bash
+# Treinar a CVNN-U-Net (modelo principal)
+python codigo/treinar.py --modelo cvnn_unet
+
+# Treinar a U-Net Real (canais Real/Imaginário)
+python codigo/treinar.py --modelo real_unet_ri
+
+# Treinar a GAN (pix2pix)
+python codigo/treinar.py --modelo gan
+```
+Os pesos dos modelos treinados serão salvos na pasta `./checkpoints/`.
+
+**(Opcional) Pesos Pré-treinados:** Para pular o treinamento, baixe os pesos pré-treinados em `[SEU LINK DO GOOGLE DRIVE/DROPBOX AQUI]` e descompacte-os na pasta `./checkpoints/`.
+
+**b) Avaliação**
+Após o treinamento (ou o download dos pesos), execute o script de avaliação para reproduzir os resultados da Tabela 1 do artigo.
+
+```bash
+python codigo/avaliar.py
+```
+O script irá carregar os melhores pesos de cada modelo, executar a inferência no conjunto de teste e imprimir a tabela de métricas no console.
+
+O baseline de Compressed Sensing pode ser executado separadamente:
+```bash
+python codigo/cs_baseline.py
+```
+
+BIBLIOTECAS USADAS
+
+torch==2.1.0
+torchvision==0.16.0
+numpy==1.26.0
+h5py==3.10.0
+scikit-image==0.22.0
+tqdm==4.66.1
+PyWavelets==1.4.1
+
+ESQUELETO CODIGO 
+
+import torch
+import torch.nn as nn
+
+# Implementação da modReLU
+class ModReLU(nn.Module):
+    def __init__(self, in_features):
+        super(ModReLU, self).__init__()
+        self.b = nn.Parameter(torch.zeros(in_features))
+
+    def forward(self, x):
+        # x é um tensor complexo
+        mag = torch.abs(x)
+        phase = torch.angle(x)
+        
+        # Aplicar ReLU na magnitude
+        mag_activated = nn.functional.relu(mag + self.b.unsqueeze(0).unsqueeze(-1).unsqueeze(-1))
+        
+        # Reconstruir o tensor complexo
+        real_part = mag_activated * torch.cos(phase)
+        imag_part = mag_activated * torch.sin(phase)
+        
+        return torch.complex(real_part, imag_part)
+
+# Bloco básico da U-Net (pode ser usado para a real e a complexa)
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, is_complex=False):
+        super(ConvBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat if is_complex else torch.float)
+        self.bn1 = nn.BatchNorm2d(out_channels) 
+        self.act1 = ModReLU(out_channels) if is_complex else nn.ReLU()
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, dtype=torch.cfloat if is_complex else torch.float)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.act2 = ModReLU(out_channels) if is_complex else nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv1(x)
+        # BatchNorm em dados complexos precisa ser tratado com cuidado.
+        # PyTorch não tem uma BatchNorm nativa para complexos, uma implementação real seria necessária.
+        # Aqui, aplicamos em magnitude para simplificar.
+        if torch.is_complex(x):
+            mag = self.bn1(torch.abs(x))
+            phase = torch.angle(x)
+            x = torch.polar(mag, phase)
+        else:
+            x = self.bn1(x)
+        x = self.act1(x)
+
+        x = self.conv2(x)
+        if torch.is_complex(x):
+            mag = self.bn2(torch.abs(x))
+            phase = torch.angle(x)
+            x = torch.polar(mag, phase)
+        else:
+            x = self.bn2(x)
+        x = self.act2(x)
+        return x
+
+# Arquitetura da U-Net (genérica)
+class Unet(nn.Module):
+    def __init__(self, in_channels, out_channels, is_complex=False):
+        super(Unet, self).__init__()
+        # ... Implementação completa da U-Net com encoder, decoder e skip connections...
+        # Esta é uma estrutura simplificada para demonstração.
+        self.enc1 = ConvBlock(in_channels, 64, is_complex)
+        self.pool = nn.MaxPool2d(2)
+        # ...
+        self.dec1 = nn.ConvTranspose2d(64, out_channels, kernel_size=2, stride=2)
+        self.final_conv = nn.Conv2d(out_channels, out_channels, kernel_size=1, dtype=torch.cfloat if is_complex else torch.float)
+
+    def forward(self, x):
+        # ... Lógica do forward da U-Net ...
+        x1 = self.enc1(x)
+        # ...
+        out = self.dec1(self.pool(x1))
+        return self.final_conv(out)
+
+TREINAMENTO
+
+import torch
+import argparse
+from torch.utils.data import DataLoader
+# from dataset import MRIDataset # Supondo que você crie este arquivo
+# from modelos import Unet # Supondo que você crie este arquivo
+
+def train(modelo, data_loader, optimizer, loss_fn, device):
+    modelo.train()
+    total_loss = 0
+    for batch in data_loader:
+        inputs, targets = batch
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        optimizer.zero_grad()
+        outputs = modelo(inputs)
+        
+        # Em U-Nets, a perda é geralmente na imagem final
+        loss = loss_fn(torch.abs(outputs), torch.abs(targets)) # Exemplo: perda na magnitude
+        
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    
+    print(f"Loss média da época: {total_loss / len(data_loader)}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Treinamento de modelos para reconstrução de MRI")
+    parser.add_argument('--modelo', type=str, required=True, help='Qual modelo treinar (cvnn_unet, real_unet_ri, etc.)')
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Usando dispositivo: {device}")
+
+    # Carregar dados
+    # train_dataset = MRIDataset(split='train')
+    # train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+
+    # Inicializar modelo, otimizador e função de perda
+    if args.modelo == "cvnn_unet":
+        print("Treinando CVNN-U-Net...")
+        # model = Unet(in_channels=1, out_channels=1, is_complex=True).to(device)
+    elif args.modelo == "real_unet_ri":
+        print("Treinando Real-U-Net-RI...")
+        # model = Unet(in_channels=2, out_channels=2, is_complex=False).to(device)
+    # ... outros modelos
+    
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    # loss_fn = nn.L1Loss()
+
+    # Loop de treinamento
+    # num_epochs = 50
+    # for epoch in range(num_epochs):
+    #     print(f"Época {epoch+1}/{num_epochs}")
+    #     train(model, train_loader, optimizer, loss_fn, device)
+    #     # Salvar checkpoint
+    #     torch.save(model.state_dict(), f'./checkpoints/{args.modelo}_epoch_{epoch+1}.pth')
+
